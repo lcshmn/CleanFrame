@@ -650,3 +650,15 @@ html,body{width:100%;height:100%;overflow:hidden;background:#000}
 .live-preview-cap{display:flex;align-items:center;margin-top:14px;font-size:24px;line-height:32px;color:var(--mute)}
 .live-preview .live-dot{width:12px;height:12px;border-radius:50%;background:#8393a4;margin-right:12px}
 .live-preview.is-live .live-dot{background:#59d58b}
+/* Full-screen live: page goes transparent so the BEHIND video plane shows through the launcher. */
+html.live-full,body.live-full,body.live-full .stage,body.live-full .scene{background:transparent}
+body.live-full #bg{display:none}
+/* The dock can't frost the hardware video plane, so drop the baked wallpaper material and let the
+   sharp video show through a translucent dark panel instead (keeps tiles and labels readable). */
+body.live-full .mat{display:block}
+body.live-full .mat-img,body.live-full .mat-scrim{display:none}
+body.live-full .mat-veil{display:block!important;background:rgba(4,9,12,.72)!important}
+/* Full-screen live only: lift the clock and top controls off the moving picture for readability. */
+body.live-full .clock,body.live-full .cap-title{text-shadow:0 2px 6px rgba(0,0,0,.72),0 1px 2px rgba(0,0,0,.6)!important;opacity:1!important}
+body.live-full .u{text-shadow:0 2px 6px rgba(0,0,0,.72),0 1px 2px rgba(0,0,0,.6)}
+body.live-full .u .ico{filter:drop-shadow(0 2px 4px rgba(0,0,0,.7))}

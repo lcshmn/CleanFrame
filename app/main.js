@@ -104,7 +104,7 @@
   var S = {
     variant: 'B', geom: 'broad', c: null, stack: null,
     sel: null, selIdx: 0, lastUtil: 0, appsFocus: null, settingsFocus: 'background', appearanceFocus: 'bg', detailFocus: {},
-    inputsByKey: {}, detectedKeys: [], previewVisible: false, previewBusy: false,
+    inputsByKey: {}, detectedKeys: [], previewVisible: false, previewBusy: false, previewFull: false,
     undo: [], removedAt: {}, note: null, err: null,
     writes: 0, failed: 0, log: [], logN: 0, lastLaunch: null, press: null,
     wallShown: null, wallPending: null, wallError: null,
@@ -379,7 +379,7 @@
       home: h, recent: recent, lastApp: h.indexOf(s.lastApp) >= 0 ? s.lastApp : h[0],
       mode: pick(s.mode, MODES.map(function (m) { return m.id; }), 'fixed'),
       inputs: (s.inputs && typeof s.inputs === 'object' && !Array.isArray(s.inputs)) ? sanitiseInputs(s.inputs) : sanitiseInputs(INPUT_DEFAULTS),
-      preview: s.preview === true
+      preview: previewMode(s.preview)
     };
   }
   function serialise(c) {
@@ -568,7 +568,7 @@
   function openSettings() { push({ id: 'settings', f: { id: S.settingsFocus } }); }
   function openAppearance(group) {
     var axis = { background: 'bg', layout: 'layout', typography: 'font', focus: 'focus' }[group];
-    var action = S.detailFocus[group] || (axis ? 'choice.' + axis + '.' + S.c[axis] : group === 'rotation' ? 'rotation.' + S.c.mode : 'samsung.home');
+    var action = S.detailFocus[group] || (axis ? 'choice.' + axis + '.' + S.c[axis] : group === 'rotation' ? 'rotation.' + S.c.mode : group === 'preview' ? 'preview.toggle' : 'samsung.home');
     push({ id: 'appearance', group: group, f: { action: action } });
   }
   function openMessage(key) { push({ id: 'message', msg: key, f: { b: 0 } }); }
@@ -881,7 +881,8 @@
       { id: 'background', label: 'Background', value: S.c.bg === 'photo' ? wall(S.c.wall).name : VALUE_NAMES[S.c.bg] },
       { id: 'layout', label: 'Layout', value: VALUE_NAMES[S.c.layout] },
       { id: 'typography', label: 'Typography', value: FONTS[S.c.font].name },
-      { id: 'focus', label: 'Focus', value: VALUE_NAMES[S.c.focus] + (materialApplies() ? ', ' + VALUE_NAMES[S.c.material] : '') }];
+      { id: 'focus', label: 'Focus', value: VALUE_NAMES[S.c.focus] + (materialApplies() ? ', ' + VALUE_NAMES[S.c.material] : '') },
+      { id: 'preview', label: 'Live preview', value: S.c.preview === 'full' ? 'Full screen' : S.c.preview === 'box' ? 'Box' : 'Off' }];
     if (k) rows.push({ id: 'inputs', label: 'Inputs', value: k + (k === 1 ? ' input' : ' inputs') });
     rows.push({ id: 'editor', label: 'Apps on Home', value: n + (n === 1 ? ' app' : ' apps') });
     rows.push({ id: 'samsung', label: 'Samsung', value: 'Home and TV settings' });
@@ -905,7 +906,7 @@
     if (id === 'editor') openEditor('settings');
     else openAppearance(id);
   }
-  var DETAIL_NAMES = { background: 'Background', layout: 'Layout', typography: 'Typography', focus: 'Focus', rotation: 'Rotation', samsung: 'Samsung', inputs: 'Inputs' };
+  var DETAIL_NAMES = { background: 'Background', layout: 'Layout', typography: 'Typography', focus: 'Focus', rotation: 'Rotation', samsung: 'Samsung', inputs: 'Inputs', preview: 'Live preview' };
   function isInputGroup(g) { return typeof g === 'string' && g.lastIndexOf('input:', 0) === 0; }
   function detailTitle(t) { return isInputGroup(t.group) ? inputDisplayName(t.group.slice(6)) : (DETAIL_NAMES[t.group] || ''); }
   function backLabel(t) { return t.group === 'rotation' ? 'Background' : isInputGroup(t.group) ? 'Inputs' : 'Settings'; }
@@ -934,8 +935,13 @@
     ];
     if (t.group === 'rotation') return [{ id: 'mode', title: '', items: options('mode', MODES.map(function (m) { return m.id; }), flat),
       reason: flat ? 'Choose Photo in Background to use rotation.' : 'Timed changes pause while Settings or another panel is open.' }];
+    if (t.group === 'preview') return [
+      { id: 'preview', title: 'Live preview', horizontal: true, items: [
+        { action: 'preview.off', previewMode: 'off', checkable: true, checked: S.c.preview === 'off', label: 'Off' },
+        { action: 'preview.box', previewMode: 'box', checkable: true, checked: S.c.preview === 'box', label: 'Box' },
+        { action: 'preview.full', previewMode: 'full', checkable: true, checked: S.c.preview === 'full', label: 'Full screen' }],
+        reason: 'Shows the current source (Live TV or the active input) on Home — in a small box, or full screen behind the launcher.' }];
     if (t.group === 'inputs') return [
-      { id: 'preview', title: 'Live preview', items: [{ action: 'preview.toggle', previewToggle: true, checkable: true, checked: !!S.c.preview, label: S.c.preview ? 'On' : 'Off', description: 'Show the current source in a small window on Home' }] },
       { id: 'inputs', title: 'Connected inputs', items: S.detectedKeys.map(function (key) {
         return { action: 'input.' + key, inputOpen: key, label: inputDisplayName(key), description: (S.inputsByKey[key] && S.inputsByKey[key].port) || key };
       }) }];
@@ -1021,14 +1027,16 @@
     closeInputText();
     if (key) setInputName(key, value); // empty clears back to the default name
   }
-  function setPreview(on) {
+  function previewMode(v) { return v === 'full' ? 'full' : (v === true || v === 'box') ? 'box' : 'off'; }
+  function setPreview(mode) {
     var c = next(S.c.home.slice(), S.c.recent.slice());
-    c.preview = !!on;
+    c.preview = previewMode(mode);
     if (write(c, 'Live preview')) previewSync();
   }
-  /* Live source preview. On the TV the current source (tuner or active HDMI) shows on the FRONT
-     video plane over this box, so no transparent hole is needed. The browser preview shows only
-     the placeholder frame, which still lets the box position be checked. */
+  /* Live source preview. The current source (tuner or active HDMI) shows on a tvwindow video plane.
+     Box mode uses the FRONT plane over a small box (video composited over the UI). Full-screen mode
+     uses the BEHIND plane at full size, with the page made transparent so the video shows through
+     behind the launcher. The browser preview shows only the placeholder frame. */
   var previewEl = null;
   function previewTvWindow() { return window.tizen && window.tizen.tvwindow; }
   function ensurePreviewEl() {
@@ -1040,23 +1048,40 @@
     stage.appendChild(o);
     previewEl = o; return o;
   }
-  function previewBoxVisible() { return !!(S.c && S.c.preview) && top().id === 'home'; }
-  function previewWanted() { return previewBoxVisible() && !document.hidden && !busy; }
+  function previewActiveOnHome() { return !!(S.c && S.c.preview && S.c.preview !== 'off') && top().id === 'home'; }
+  function previewWanted() { return previewActiveOnHome() && !document.hidden && !busy; }
+  function setLiveFull(on) { document.documentElement.classList.toggle('live-full', !!on); document.body.classList.toggle('live-full', !!on); }
   function previewSync() {
+    var active = previewActiveOnHome();
+    var full = active && S.c.preview === 'full';
     var o = ensurePreviewEl();
-    o.hidden = !previewBoxVisible();
+    o.hidden = !(active && !full); // box frame only in box mode
+    setLiveFull(full);
     var tvw = previewTvWindow();
     if (!tvw) return; // browser: placeholder box only
+    if (S.previewBusy) return;
     var want = previewWanted();
-    if (S.previewBusy || want === S.previewVisible) return;
+    var wantFull = want && S.c.preview === 'full';
+    if (want === S.previewVisible && (!want || wantFull === S.previewFull)) return;
     S.previewBusy = true;
     if (want) {
-      var r = o.querySelector('.live-preview-frame').getBoundingClientRect();
-      var rect = [Math.round(r.left) + 'px', Math.round(r.top) + 'px', Math.round(r.width) + 'px', Math.round(r.height) + 'px'];
-      try {
-        tvw.show(function () { S.previewBusy = false; S.previewVisible = true; o.className = 'live-preview is-live'; previewSync(); },
-          function () { S.previewBusy = false; S.previewVisible = false; }, rect, 'MAIN', 'FRONT');
-      } catch (e) { S.previewBusy = false; }
+      var rect;
+      if (wantFull) rect = ['0px', '0px', (window.innerWidth || 1920) + 'px', (window.innerHeight || 1080) + 'px'];
+      else {
+        var r = o.querySelector('.live-preview-frame').getBoundingClientRect();
+        rect = [Math.round(r.left) + 'px', Math.round(r.top) + 'px', Math.round(r.width) + 'px', Math.round(r.height) + 'px'];
+      }
+      var z = wantFull ? 'BEHIND' : 'FRONT';
+      var doShow = function () {
+        try {
+          tvw.show(function () { S.previewBusy = false; S.previewVisible = true; S.previewFull = wantFull; if (!wantFull) o.className = 'live-preview is-live'; previewSync(); },
+            function () { S.previewBusy = false; S.previewVisible = false; }, rect, 'MAIN', z);
+        } catch (e) { S.previewBusy = false; }
+      };
+      if (S.previewVisible && wantFull !== S.previewFull) {
+        try { tvw.hide(function () { S.previewVisible = false; doShow(); }, function () { S.previewBusy = false; }, 'MAIN'); }
+        catch (e) { S.previewBusy = false; }
+      } else doShow();
     } else {
       try {
         tvw.hide(function () { S.previewBusy = false; S.previewVisible = false; if (previewEl) previewEl.className = 'live-preview'; previewSync(); },
@@ -1080,7 +1105,7 @@
       else if (error) setLook(error.patch, { row: error.row });
     } else if (item.axis === 'mode') applyRotation(item.value);
     else if (item.axis) { patch[item.axis] = item.value; setLook(patch, { row: item.axis }); }
-    else if (item.previewToggle) setPreview(!S.c.preview);
+    else if (item.previewMode) setPreview(item.previewMode);
     else if (item.inputOpen !== undefined) openAppearance('input:' + item.inputOpen);
     else if (item.custom) openInputText(item.inputKey);
     else if (item.inputKey !== undefined) setInputName(item.inputKey, item.inputName);
