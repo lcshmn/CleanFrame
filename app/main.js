@@ -5,6 +5,38 @@
   /* ---------- Bundled data ---------- */
   var ASSETS = 'assets/', ICONS = ASSETS + 'icons/', WP = ASSETS + 'wallpapers/';
   var CAP = 9, SCRIM_Y = 560;
+  /* Dynamic external-input tiles (HDMI, …). Injected into Home in memory only, never persisted,
+     and refreshed from the TV. Colon-free ids keep them valid for safeId and DOM actions. */
+  var SRC = 'cfsrc';
+  function isSource(id) { return typeof id === 'string' && id.lastIndexOf(SRC, 0) === 0; }
+  /* Input names. A fresh install seeds these defaults; afterwards names live in the saved config
+     and are edited in Settings → Inputs. A CEC name the TV reports (rare) wins over the config. */
+  var INPUT_DEFAULTS = { HDMI1: 'NVIDIA Shield' };
+  var INPUT_PRESETS = ['NVIDIA Shield', 'PlayStation', 'Nintendo Switch', 'Fire TV', 'Apple TV', 'Xbox', 'Blu-ray', 'PC'];
+  /* Auto-pick a monochrome icon for an input from its name; falls back to the generic HDMI glyph. */
+  function inputIcon(name) {
+    var n = String(name || '').toLowerCase();
+    if (/shield|nvidia/.test(n)) return 'shield';
+    if (/playstation|\bps[1-9]\b/.test(n)) return 'playstation';
+    if (/switch|nintendo/.test(n)) return 'switch';
+    if (/fire\s*tv|firetv|fire\s*stick|firestick/.test(n)) return 'firetv';
+    if (/apple\s*tv/.test(n)) return 'appletv';
+    if (/xbox/.test(n)) return 'xbox';
+    if (/\bpc\b|computer|windows|desktop|laptop/.test(n)) return 'pc';
+    return 'hdmi';
+  }
+  function inputKeyOf(s) { return String(s.type || 'IN') + (s.number || s.number === 0 ? s.number : ''); }
+  function defaultInputName(key) { var m = /^([A-Za-z]+)(\d+)?$/.exec(key); return (m ? m[1] : 'Input') + (m && m[2] ? ' ' + m[2] : ''); }
+  function inputCec(key) { return (S.inputsByKey[key] && S.inputsByKey[key].cec) || ''; }
+  /* Priority: a CEC name from the TV, then the manual name from the config, then "HDMI n". */
+  function inputDisplayName(key) { return inputCec(key) || (S.c && S.c.inputs && S.c.inputs[key]) || defaultInputName(key); }
+  function sanitiseInputs(obj) {
+    var out = {};
+    Object.keys(obj).slice(0, 32).forEach(function (k) {
+      if (/^[A-Za-z0-9]{1,16}$/.test(k) && typeof obj[k] === 'string' && obj[k].trim() && obj[k].length <= 64) out[k] = obj[k].trim();
+    });
+    return out;
+  }
   var DOCK_MODES = { both: { tw: 288, th: 200, pitch: 296 }, text: { tw: 288, th: 104, pitch: 296 }, icons: { tw: 176, th: 144, pitch: 184 } };
   var GRID_ROW = 240, GRID_COL = 344, COLS = 5;
   var ED_ROW = 80, ED_SEP = 56, ED_VIEW = 752;
@@ -14,15 +46,13 @@
   var FULL = 'Home holds nine apps. Remove one first.', LAST = 'Home needs one app';
 
   var PRIMARY_APPS = [
-    { id: 'stremio', name: 'Stremio', mark: true, appId: 'IkWsFHtOY9.Stremio' },
+    { id: 'livetv', name: 'Live TV', mark: true, appId: 'org.tizen.tv-viewer' },
     { id: 'netflix', name: 'Netflix', mark: true, appId: 'org.tizen.netflix-app' },
-    { id: 'disneyplus', name: 'Disney+', mark: true, appId: 'MCmYXNxgcu.DisneyPlus' },
-    { id: 'youtube', name: 'YouTube', mark: true, appId: '9Ur5IzDKqV.TizenYouTube' },
-    { id: 'appletv', name: 'Apple TV', mark: true, appId: 'com.samsung.tv.aria-video' },
+    { id: 'youtube', name: 'YouTube', mark: true, appId: 'xvvl3S1TT1.TizenTubeStandalone' },
+    { id: 'twitch', name: 'Twitch', mark: true, appId: 'Jz7aUrV2Q4.Twitch' },
     { id: 'primevideo', name: 'Prime Video', mark: true, appId: 'org.tizen.primevideo' },
-    { id: 'abciview', name: 'ABC iview', mark: true, appId: 'mWK87Xghap.ABCiview' },
-    { id: 'sbs', name: 'SBS On Demand', mark: true, appId: 'OyE7OuxlUi.SBSOnDemand' },
-    { id: 'applemusic', name: 'Apple Music', mark: true, appId: 'org.tizen.apple.apple-music' }
+    { id: 'disneyplus', name: 'Disney+', mark: true, appId: 'MCmYXNxgcu.DisneyPlus' },
+    { id: 'appletv', name: 'Apple TV', mark: true, appId: 'com.samsung.tv.aria-video' }
   ];
   var PRIMARY = PRIMARY_APPS.map(function (a) { return a.id; }), APPS = PRIMARY_APPS.slice(), ALPHA = [];
   var WALLS = window.CleanFrameWallpapers || [{ id: 'misty', name: 'Misty coast', tone: 'light', ut: { tr: 'mist', br: 'mist' }, frostVeil: .20 }];
@@ -74,6 +104,7 @@
   var S = {
     variant: 'B', geom: 'broad', c: null, stack: null,
     sel: null, selIdx: 0, lastUtil: 0, appsFocus: null, settingsFocus: 'background', appearanceFocus: 'bg', detailFocus: {},
+    inputsByKey: {}, detectedKeys: [],
     undo: [], removedAt: {}, note: null, err: null,
     writes: 0, failed: 0, log: [], logN: 0, lastLaunch: null, press: null,
     wallShown: null, wallPending: null, wallError: null,
@@ -331,10 +362,10 @@
     var legacyList = s.theme === 'list', h = [], recent = [], records = Array.isArray(s.appRecords) ? s.appRecords : [];
     records.slice(0, 256).forEach(function (a) {
       if (!a || !safeId(a.id) || !safeId(a.appId) || typeof a.name !== 'string' || !a.name.trim() || app(a.id)) return;
-      APPS.push({ id: a.id, appId: a.appId, name: a.name.slice(0, 160), brand: ['hbomax', 'spotify', 'tubi'].indexOf(a.brand) >= 0 ? a.brand : '', mark: ['hbomax', 'spotify', 'tubi'].indexOf(a.brand) >= 0, icon: safeIcon(a.icon) });
+      APPS.push({ id: a.id, appId: a.appId, name: a.name.slice(0, 160), brand: ['hbomax', 'spotify', 'tubi', 'wow'].indexOf(a.brand) >= 0 ? a.brand : '', mark: ['hbomax', 'spotify', 'tubi', 'wow'].indexOf(a.brand) >= 0, icon: safeIcon(a.icon) });
     });
     (Array.isArray(s.home) ? s.home : Array.isArray(s.dock) ? s.dock : []).forEach(function (id) {
-      if (!safeId(id) || h.indexOf(id) >= 0 || h.length >= CAP) return;
+      if (!safeId(id) || isSource(id) || h.indexOf(id) >= 0 || h.length >= CAP) return;
       if (!app(id) && id.indexOf('.') > 0) APPS.push({ id: id, appId: id, name: id.split('.').pop(), mark: false });
       if (app(id)) h.push(id);
     });
@@ -346,16 +377,18 @@
       focus: pick(modern.focus, LOOK_VALUES.focus, legacyList ? 'type' : 'glass'), material: pick(modern.material, LOOK_VALUES.material, 'soft'),
       font: pick(modern.font, LOOK_VALUES.font, 'manrope'), wall: wall(modern.wall || s.wallpaper) ? modern.wall || s.wallpaper : WALLS[0].id,
       home: h, recent: recent, lastApp: h.indexOf(s.lastApp) >= 0 ? s.lastApp : h[0],
-      mode: pick(s.mode, MODES.map(function (m) { return m.id; }), 'fixed')
+      mode: pick(s.mode, MODES.map(function (m) { return m.id; }), 'fixed'),
+      inputs: (s.inputs && typeof s.inputs === 'object' && !Array.isArray(s.inputs)) ? sanitiseInputs(s.inputs) : sanitiseInputs(INPUT_DEFAULTS)
     };
   }
   function serialise(c) {
-    var out = {};
+    var out = {}, base = c.home.filter(function (id) { return !isSource(id); });
     Object.keys(c).forEach(function (key) { out[key] = c[key]; });
-    out.version = 2; out.look = lookOf(c); out.dock = c.home.slice(); out.wallpaper = c.wall;
+    out.version = 2; out.look = lookOf(c); out.home = base; out.dock = base.slice(); out.wallpaper = c.wall;
     out.theme = c.layout === 'list' ? 'list' : 'shore';
+    if (isSource(out.lastApp)) out.lastApp = base[0];
     out.appRecords = [];
-    c.home.concat(c.recent).forEach(function (key) {
+    base.concat(c.recent).forEach(function (key) {
       var a = app(key);
       if (a && PRIMARY.indexOf(key) < 0 && !out.appRecords.some(function (r) { return r.id === key; })) out.appRecords.push({ id: a.id, appId: a.appId, name: a.name, brand: a.brand || '', icon: a.icon || '' });
     });
@@ -371,7 +404,7 @@
   }
   function clearSession() { S.undo = []; S.removedAt = {}; S.note = null; S.err = null; }
   function begin() { S.note = null; }
-  function next(home, recent) { var c = lookOf(S.c); c.home = home; c.recent = recent; c.lastApp = S.c.lastApp; c.mode = S.c.mode; return c; }
+  function next(home, recent) { var c = lookOf(S.c); c.home = home; c.recent = recent; c.lastApp = S.c.lastApp; c.mode = S.c.mode; c.inputs = S.c.inputs; return c; }
   function snap() { return { home: S.c.home.slice(), recent: S.c.recent.slice() }; }
   function pushRecent(list, id) { return [id].concat(without(list, id)).slice(0, 5); }
   function write(c, label) {
@@ -457,11 +490,39 @@
     });
   }
   function launch(id) {
-    var a = app(id), c;
+    var a = app(id), c, run;
     if (!a || busy) return;
-    if (S.c.home.indexOf(id) >= 0) { c = next(S.c.home.slice(), S.c.recent.slice()); c.lastApp = id; write(c, 'Last app'); }
+    if (a.source) run = function (done) { FrameDevice.switchSource(a.source, done); };
+    else if (a.appId === 'org.tizen.tv-viewer') run = function (done) { FrameDevice.liveTv(done); };
+    else run = function (done) { FrameDevice.launchApp(a.appId, done); };
+    if (!a.source && S.c.home.indexOf(id) >= 0) { c = next(S.c.home.slice(), S.c.recent.slice()); c.lastApp = id; write(c, 'Last app'); }
     S.press = id; S.lastLaunch = a.name;
-    perform(a.name, function (done) { FrameDevice.launchApp(a.appId, done); });
+    perform(a.name, run);
+  }
+  function loadSources() {
+    if (!FrameDevice.sources) return;
+    FrameDevice.sources(function (err, list) { if (!err && list) applySources(list); });
+  }
+  function applySources(list) {
+    var seen = {}, i, byKey = {}, keys = [];
+    // Drop the previous dynamic tiles, then add the inputs the TV reports now.
+    for (i = APPS.length - 1; i >= 0; i--) if (APPS[i].source) APPS.splice(i, 1);
+    S.c.home = S.c.home.filter(function (id) { return !isSource(id); });
+    list.forEach(function (s) {
+      var key = inputKeyOf(s), id = SRC + key.replace(/[^A-Za-z0-9]/g, '');
+      if (!safeId(id) || seen[id]) return;
+      seen[id] = true;
+      byKey[key] = { key: key, type: s.type, number: s.number, cec: s.cec || '', port: defaultInputName(key) };
+      keys.push(key);
+      S.inputsByKey = byKey; // so inputDisplayName can read this input's CEC name
+      var nm = inputDisplayName(key);
+      APPS.push({ id: id, appId: '', name: nm, brand: inputIcon(nm), mark: true, icon: '', source: s });
+      S.c.home.push(id);
+    });
+    S.inputsByKey = byKey; S.detectedKeys = keys;
+    if (!app(S.sel)) S.sel = S.c.home[0];
+    S.selIdx = S.c.home.indexOf(S.sel);
+    if (!busy) render(); // names/icons can change even when the set of inputs does not
   }
   function refreshCatalog() {
     var request, oldFocus;
@@ -491,7 +552,7 @@
   }
 
   /* ---------- Navigation targets ---------- */
-  function utils() { return ['art', 'apps', 'settings']; }
+  function utils() { return ['apps', 'settings']; }
   /* prev/next run along the apps; out goes to the controls, inn comes back (or to a per-app action). */
   function axes() {
     var v = S.c.layout === 'list';
@@ -815,13 +876,15 @@
   /* ---------- Settings, Layout and messages ---------- */
   function mode() { for (var i = 0; i < MODES.length; i++) if (MODES[i].id === S.c.mode) return MODES[i]; return MODES[0]; }
   function settingsRows() {
-    var n = S.c.home.length;
-    return [{ id: 'background', label: 'Background', value: S.c.bg === 'photo' ? wall(S.c.wall).name : VALUE_NAMES[S.c.bg] },
+    var n = S.c.home.length, k = S.detectedKeys.length, rows = [
+      { id: 'background', label: 'Background', value: S.c.bg === 'photo' ? wall(S.c.wall).name : VALUE_NAMES[S.c.bg] },
       { id: 'layout', label: 'Layout', value: VALUE_NAMES[S.c.layout] },
       { id: 'typography', label: 'Typography', value: FONTS[S.c.font].name },
-      { id: 'focus', label: 'Focus', value: VALUE_NAMES[S.c.focus] + (materialApplies() ? ', ' + VALUE_NAMES[S.c.material] : '') },
-      { id: 'editor', label: 'Apps on Home', value: n + (n === 1 ? ' app' : ' apps') },
-      { id: 'samsung', label: 'Samsung', value: 'Home and TV settings' }];
+      { id: 'focus', label: 'Focus', value: VALUE_NAMES[S.c.focus] + (materialApplies() ? ', ' + VALUE_NAMES[S.c.material] : '') }];
+    if (k) rows.push({ id: 'inputs', label: 'Inputs', value: k + (k === 1 ? ' input' : ' inputs') });
+    rows.push({ id: 'editor', label: 'Apps on Home', value: n + (n === 1 ? ' app' : ' apps') });
+    rows.push({ id: 'samsung', label: 'Samsung', value: 'Home and TV settings' });
+    return rows;
   }
   function settingsIds() { return settingsRows().map(function (r) { return r.id; }); }
   V.settings = {
@@ -841,7 +904,10 @@
     if (id === 'editor') openEditor('settings');
     else openAppearance(id);
   }
-  var DETAIL_NAMES = { background: 'Background', layout: 'Layout', typography: 'Typography', focus: 'Focus', rotation: 'Rotation', samsung: 'Samsung' };
+  var DETAIL_NAMES = { background: 'Background', layout: 'Layout', typography: 'Typography', focus: 'Focus', rotation: 'Rotation', samsung: 'Samsung', inputs: 'Inputs' };
+  function isInputGroup(g) { return typeof g === 'string' && g.lastIndexOf('input:', 0) === 0; }
+  function detailTitle(t) { return isInputGroup(t.group) ? inputDisplayName(t.group.slice(6)) : (DETAIL_NAMES[t.group] || ''); }
+  function backLabel(t) { return t.group === 'rotation' ? 'Background' : isInputGroup(t.group) ? 'Inputs' : 'Settings'; }
   function choice(axis, value, disabled) {
     return { action: axis === 'mode' ? 'rotation.' + value : 'choice.' + axis + '.' + value, axis: axis, value: value, disabled: !!disabled,
       label: axis === 'font' ? FONTS[value].name : axis === 'mode' ? MODES.filter(function (m) { return m.id === value; })[0].name : value === 'both' ? 'Both' : VALUE_NAMES[value] };
@@ -867,13 +933,23 @@
     ];
     if (t.group === 'rotation') return [{ id: 'mode', title: '', items: options('mode', MODES.map(function (m) { return m.id; }), flat),
       reason: flat ? 'Choose Photo in Background to use rotation.' : 'Timed changes pause while Settings or another panel is open.' }];
+    if (t.group === 'inputs') return [{ id: 'inputs', title: 'Connected inputs', items: S.detectedKeys.map(function (key) {
+      return { action: 'input.' + key, inputOpen: key, label: inputDisplayName(key), description: (S.inputsByKey[key] && S.inputsByKey[key].port) || key };
+    }) }];
+    if (isInputGroup(t.group)) {
+      var ikey = t.group.slice(6), current = (S.c.inputs && S.c.inputs[ikey]) || '', cec = inputCec(ikey), items = [];
+      items.push({ action: 'inputname.' + ikey + '.def', inputKey: ikey, inputName: '', label: defaultInputName(ikey) + ' (default)', checkable: true, checked: !current });
+      INPUT_PRESETS.forEach(function (p, idx) { items.push({ action: 'inputname.' + ikey + '.' + idx, inputKey: ikey, inputName: p, label: p, checkable: true, checked: current === p }); });
+      items.push({ action: 'inputname.' + ikey + '.custom', inputKey: ikey, custom: true, label: current && INPUT_PRESETS.indexOf(current) < 0 ? 'Custom: ' + current : 'Custom name…', checkable: true, checked: !!current && INPUT_PRESETS.indexOf(current) < 0 });
+      return [{ id: 'name', title: cec ? 'Name — TV reports “' + cec + '”' : 'Name', items: items, reason: cec ? 'The TV provides a name for this input, so it is used automatically.' : '' }];
+    }
     return [{ id: 'samsung', title: '', items: [
       { action: 'samsung.home', label: 'Samsung Home', description: 'Open Samsung’s Home screen' },
       { action: 'samsung.settings', label: 'TV settings', description: 'Picture, sound and network settings' }
     ] }];
   }
   function detailRows(t) {
-    var rows = [[{ action: 'settings.back', label: t.group === 'rotation' ? 'Background' : 'Settings' }]];
+    var rows = [[{ action: 'settings.back', label: backLabel(t) }]];
     detailSections(t).forEach(function (section) {
       var enabled = section.items.filter(function (item) { return !item.disabled; });
       if (section.horizontal && enabled.length) rows.push(enabled);
@@ -901,6 +977,47 @@
     c = next(S.c.home.slice(), S.c.recent.slice()); c.mode = value;
     if (!write(c, 'Wallpaper rotation')) S.lookError = { type: 'save', patch: { mode: value }, row: 'mode', transient: false };
   }
+  function setInputName(key, name) {
+    var c = next(S.c.home.slice(), S.c.recent.slice()), ins = {};
+    Object.keys(S.c.inputs || {}).forEach(function (k) { ins[k] = S.c.inputs[k]; });
+    if (name) ins[key] = name; else delete ins[key];
+    c.inputs = ins;
+    if (write(c, 'Input name')) { loadSources(); pop(); }
+  }
+  /* Free-text input name. A real <input> brings up the TV's on-screen keyboard; while it is open
+     S.textOpen makes the stage ignore the remote so the field (and the IME) receive the keys. */
+  var textOverlay = null, textKey = null;
+  function ensureTextOverlay() {
+    if (textOverlay) return textOverlay;
+    var o = document.createElement('div');
+    o.className = 'name-entry'; o.hidden = true;
+    o.innerHTML = '<div class="name-entry-card"><h3 class="name-entry-title">Input name</h3>'
+      + '<input class="name-entry-field" type="text" maxlength="64" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">'
+      + '<p class="name-entry-hint"><span class="remote-key">OK</span><span>Save</span><span class="remote-key">Back</span><span>Cancel</span></p></div>';
+    document.body.appendChild(o);
+    o.querySelector('.name-entry-field').addEventListener('keydown', function (ev) {
+      if (ev.keyCode === 13) { ev.preventDefault(); ev.stopPropagation(); commitInputText(); }
+      else if (ev.keyCode === 27) { ev.preventDefault(); ev.stopPropagation(); closeInputText(); }
+      else ev.stopPropagation();
+    });
+    textOverlay = o; return o;
+  }
+  function openInputText(key) {
+    var o = ensureTextOverlay(), field = o.querySelector('.name-entry-field');
+    textKey = key; S.textOpen = true; o.hidden = false;
+    field.value = (S.c.inputs && S.c.inputs[key]) || '';
+    try { field.focus(); field.select(); } catch (e) {}
+  }
+  function closeInputText() {
+    S.textOpen = false;
+    if (textOverlay) { try { textOverlay.querySelector('.name-entry-field').blur(); } catch (e) {} textOverlay.hidden = true; }
+    focusStage();
+  }
+  function commitInputText() {
+    var field = textOverlay.querySelector('.name-entry-field'), value = (field.value || '').trim().slice(0, 64), key = textKey;
+    closeInputText();
+    if (key) setInputName(key, value); // empty clears back to the default name
+  }
   function detailBack() { cancelLook(); S.err = null; pop(); }
   function detailOk(t, item) {
     var patch = {}, error = S.lookError;
@@ -912,6 +1029,9 @@
       else if (error) setLook(error.patch, { row: error.row });
     } else if (item.axis === 'mode') applyRotation(item.value);
     else if (item.axis) { patch[item.axis] = item.value; setLook(patch, { row: item.axis }); }
+    else if (item.inputOpen !== undefined) openAppearance('input:' + item.inputOpen);
+    else if (item.custom) openInputText(item.inputKey);
+    else if (item.inputKey !== undefined) setInputName(item.inputKey, item.inputName);
     else if (item.action === 'background.wallpaper') openWallpaper();
     else if (item.action === 'background.rotation') openAppearance('rotation');
     else if (item.action === 'samsung.home') perform('Samsung Home', FrameDevice.home);
@@ -923,7 +1043,7 @@
       var axis = { background: 'bg', layout: 'layout', typography: 'font', focus: 'focus', rotation: 'mode' }[t.group];
       rows.forEach(function (items) { items.forEach(function (item) {
         if (item.action === t.f.action) exists = true;
-        if (item.axis === axis && item.value === S.c[axis]) applied = item;
+        if (axis ? (item.axis === axis && item.value === S.c[axis]) : item.checked) applied = item;
       }); });
       if (!exists) detailFocus(t, applied || (rows[1] || rows[0])[0], 0);
       if (t.f.column === undefined) t.f.column = detailLocation(t).column;
@@ -1056,7 +1176,7 @@
   }
 
   function clockText() {
-    var d = new Date(), h = d.getHours() % 12 || 12, m = d.getMinutes();
+    var d = new Date(), h = d.getHours(), m = d.getMinutes();
     return h + ':' + (m < 10 ? '0' : '') + m;
   }
   function clockHtml() {
@@ -1223,7 +1343,7 @@
     keyed(track, empty ? [] : items, function (el, it, i) {
       var a = it.id ? app(it.id) : null, left = i * g.pitch, focus = tileFocus && i === anchor, sel = tileSel && i === anchor;
       var lifted = hs.lifted && i === anchor, partial = g.broad && (left - off < -1 || left + g.tw - off > g.shelf + 1);
-      setContent(el, it.kind + '|' + (it.id || '') + '|' + (it.id ? dockLabelSize(it.id) : full) + '|' + S.c.bg + '|' + S.c.apps + '|' + homeFont(), function () { return '<span class="tile-content">' + dockTileHtml(it, full) + '</span>'; });
+      setContent(el, it.kind + '|' + (it.id || '') + '|' + (a ? a.name + '|' + a.brand : '') + '|' + (it.id ? dockLabelSize(it.id) : full) + '|' + S.c.bg + '|' + S.c.apps + '|' + homeFont(), function () { return '<span class="tile-content">' + dockTileHtml(it, full) + '</span>'; });
       el.className = 'tile k-' + it.kind + (focus ? ' is-focus' : '') + (sel ? ' is-sel' : '') + (lifted ? ' is-lifted' : '') + (partial ? ' is-partial' : '')
         + (a && !a.mark ? ' is-text' : '') + (it.kind === 'add' && full ? ' is-full' : '') + (it.kind === 'app' && S.press === it.id ? ' is-press' : '')
         + (lifted && i === 0 ? ' no-l' : '') + (lifted && i >= ns - 1 ? ' no-r' : '');
@@ -1385,17 +1505,18 @@
     V.appearance.norm(t);
     appearanceEl.className = 'appearance detail-' + t.group;
     appearanceRows.className = 'appearance-rows';
-    appearanceTitle.textContent = DETAIL_NAMES[t.group];
+    appearanceTitle.textContent = detailTitle(t);
     var at = detailLocation(t), selected = at.item, error = S.lookError, status = '', hint;
     function command(item, inner, cls) {
-      var applied = item.axis && S.c[item.axis] === item.value;
+      var pick = item.axis || item.checkable;
+      var applied = (item.axis && S.c[item.axis] === item.value) || !!item.checked;
       var loading = !!(item.axis && S.pending && S.pending.target[item.axis] === item.value && S.pending.row === item.axis);
       return '<button type="button" tabindex="-1" class="setting-choice' + (cls ? ' ' + cls : '') + (t.f.action === item.action ? ' is-focus' : '') + (item.disabled ? ' is-disabled' : '') + (applied ? ' is-applied' : '') + (loading ? ' is-loading' : '') + '"'
-        + (item.axis ? ' role="radio" aria-checked="' + !!applied + '"' : '') + ' aria-label="' + esc(item.axis && item.value === 'both' ? 'Icons and text' : item.label) + '" aria-disabled="' + !!item.disabled + '" aria-busy="' + loading + '"'
+        + (pick ? ' role="radio" aria-checked="' + !!applied + '"' : '') + ' aria-label="' + esc(item.axis && item.value === 'both' ? 'Icons and text' : item.label) + '" aria-disabled="' + !!item.disabled + '" aria-busy="' + loading + '"'
         + ' data-z="detail" data-i="0" data-id="' + item.action + '" data-action="' + item.action + '">' + inner
-        + (item.axis ? '<span class="setting-tick" aria-hidden="true">' + (applied ? icon('check') : '') + '</span>' : '') + '</button>';
+        + (pick ? '<span class="setting-tick" aria-hidden="true">' + (applied ? icon('check') : '') + '</span>' : '') + '</button>';
     }
-    setHTML(appearanceBack, command({ action: 'settings.back', label: t.group === 'rotation' ? 'Background' : 'Settings' }, icon('left') + '<span>' + (t.group === 'rotation' ? 'Background' : 'Settings') + '</span>', 'setting-back'));
+    setHTML(appearanceBack, command({ action: 'settings.back', label: backLabel(t) }, icon('left') + '<span>' + backLabel(t) + '</span>', 'setting-back'));
     setHTML(appearanceRows, detailSections(t).map(function (section) {
       return '<section class="setting-section' + (section.horizontal ? ' is-horizontal' : '') + ' section-' + section.id + '">'
         + (section.title ? '<h3 class="setting-label" id="setting-' + section.id + '">' + section.title + '</h3>' : '')
@@ -1407,7 +1528,7 @@
             : '<img class="setting-swatch" src="' + WP + S.c.wall + '-thumb.jpg" alt="">';
           body += '<span class="setting-copy"><span class="setting-name">' + esc(item.label) + '</span>'
             + (item.description ? '<span class="setting-description">' + esc(item.description) + '</span>' : '') + '</span>';
-          if (!item.axis) body += icon('right', 'setting-forward');
+          if (!item.axis && !item.checkable) body += icon('right', 'setting-forward');
           return command(item, body, item.description ? 'has-description' : '');
         }).join('') + '</div>'
         + (section.reason ? '<p class="setting-reason">' + esc(section.reason) + '</p>' : '') + '</section>';
@@ -1604,10 +1725,11 @@
       el.otherAfter.className = 'row-cue editor-after' + (afterRows ? ' is-on' : '');
     },
     settings: function (t, el) {
-      var html = '';
-      settingsRows().forEach(function (r) {
+      var html = '', rows = settingsRows();
+      rows.forEach(function (r) {
         html += '<button type="button" tabindex="-1" class="settings-group' + (r.id === t.f.id ? ' is-focus' : '') + '" data-z="row" data-i="0" data-id="' + r.id + '" data-action="settings.' + (r.id === 'editor' ? 'editor' : 'group.' + r.id) + '"><span class="settings-group-copy"><span class="settings-group-name">' + esc(r.label) + '</span><span class="settings-group-value">' + esc(r.value) + '</span></span>' + icon('right') + '</button>';
       });
+      el.list.className = 'settings-overview' + (rows.length > 6 ? ' is-compact' : '');
       setHTML(el.list, html);
     },
     message: function (t, el) {
@@ -1834,6 +1956,7 @@
   });
   var heldKeys = {};
   document.addEventListener('keydown', function (ev) {
+    if (S.textOpen) return; // the name-entry field (and the TV keyboard) own the remote
     var code = ev.keyCode, k = KEYS[code];
     if (code === 9) { ev.preventDefault(); return; }
     if (!k || ev.metaKey || ev.ctrlKey || ev.altKey) return;
@@ -1843,14 +1966,14 @@
   });
   document.addEventListener('keyup', function (ev) { delete heldKeys[ev.keyCode]; });
   window.addEventListener('blur', function () { heldKeys = {}; });
-  window.addEventListener('focus', function () { release(); focusStage(); after(); updateClock(); });
+  window.addEventListener('focus', function () { release(); focusStage(); after(); updateClock(); loadSources(); });
   document.addEventListener('visibilitychange', function () {
     heldKeys = {};
     if (document.hidden) { pauseRotation(); clearTimeout(clockTimer); }
     else {
       release();
       if (S.c.bg === 'photo' && !S.pending && !S.previewBundle && (!committedBundle || S.bundleKey !== bundleKey(S.c))) setLook({}, { transient: true, startup: true });
-      after(); updateClock(); focusStage();
+      after(); updateClock(); focusStage(); loadSources();
     }
   });
   window.addEventListener('resize', fit);
@@ -1889,5 +2012,5 @@
   cueL.innerHTML = icon('left'); cueR.innerHTML = icon('right');
   initialise();
   setLook({}, { transient: true, startup: true });
-  norm(); render(); fit(); focusStage(); updateClock(); syncRotation();
+  norm(); render(); fit(); focusStage(); updateClock(); syncRotation(); loadSources();
 })();

@@ -2,11 +2,10 @@
 (function () {
   'use strict';
   var IDS = {
-    stremio: 'IkWsFHtOY9.Stremio', netflix: 'org.tizen.netflix-app',
-    disneyplus: 'MCmYXNxgcu.DisneyPlus', youtube: '9Ur5IzDKqV.TizenYouTube',
-    appletv: 'com.samsung.tv.aria-video', primevideo: 'org.tizen.primevideo',
-    abciview: 'mWK87Xghap.ABCiview', sbs: 'OyE7OuxlUi.SBSOnDemand',
-    applemusic: 'org.tizen.apple.apple-music'
+    livetv: 'org.tizen.tv-viewer', netflix: 'org.tizen.netflix-app',
+    youtube: 'xvvl3S1TT1.TizenTubeStandalone', twitch: 'Jz7aUrV2Q4.Twitch',
+    primevideo: 'org.tizen.primevideo', disneyplus: 'MCmYXNxgcu.DisneyPlus',
+    appletv: 'com.samsung.tv.aria-video'
   };
   var STREAMING = ['as6cYRgkPy.Binge', '73iTZRTc34.Stan', '5b8c3eb16b.BeamCTVDev',
     'cj37Ni3qXM.HBONow', 'LBUAQX1exg.Hulu', 'gzcc4LRFBF.Peacock', 'rJyOSqC6Up.CBSAllAccess',
@@ -16,7 +15,7 @@
     'KaLitts8bq.tenplaySamsungTizen', 'eYuOiOLYQX.KayoSports', 'Ne2ZsPWdKl.9NOW',
     '3KA0pm7a7V.TubiTV', 'rJeHak5zRg.Spotify', 'icp4AvUPiA.7plus'];
   var CONSUMER_SYSTEM = ['org.tizen.browser', 'com.microsoft.copilot'];
-  var EXTRA_BRANDS = {'rJeHak5zRg.Spotify': 'spotify', '5b8c3eb16b.BeamCTVDev': 'hbomax', 'cj37Ni3qXM.HBONow': 'hbomax', '3KA0pm7a7V.TubiTV': 'tubi'};
+  var EXTRA_BRANDS = {'rJeHak5zRg.Spotify': 'spotify', '5b8c3eb16b.BeamCTVDev': 'hbomax', 'cj37Ni3qXM.HBONow': 'hbomax', '3KA0pm7a7V.TubiTV': 'tubi', 'Mo5FtpAjGy.Skyonline': 'wow'};
   var INTERNAL = ['adplatform.ADPlayer', 'WykOS4t4F0.cmsWebApp', '25emanual3.emanual',
     'd0m1lV1nt2.emanual', '2022ePop01.SmartTV',
     'ZODRT12q2l.WebAccountExtension', 'ByJlgt0XeD.CastSettingsApp', 'tv6pbVMQFF.PrivacyChoices'];
@@ -40,8 +39,19 @@
   function launchApp(id, done) {
     if (!api()) { unavailable(done); return; }
     var finish = bounded(done);
-    try { api().launch(id, function () { finish(null); }, function (err) { finish(failure(err)); }); }
-    catch (err) { finish(failure(err)); }
+    // Some built-in targets (e.g. the live-TV tuner org.tizen.tv-viewer) refuse a plain
+    // launch() but open through the default application control. Try launch() first, then fall back.
+    function viaControl(originalErr) {
+      try {
+        if (typeof tizen === 'undefined' || typeof tizen.ApplicationControl !== 'function' || !api().launchAppControl) {
+          finish(failure(originalErr)); return;
+        }
+        var control = new tizen.ApplicationControl('http://tizen.org/appcontrol/operation/default', null, null, null, null, 'SINGLE');
+        api().launchAppControl(control, id, function () { finish(null); }, function (err) { finish(failure(err || originalErr)); });
+      } catch (err) { finish(failure(err || originalErr)); }
+    }
+    try { api().launch(id, function () { finish(null); }, function (err) { viaControl(err); }); }
+    catch (err) { viaControl(err); }
   }
   function launch(brand, done) {
     if (!IDS[brand]) { done({message: 'This app has no launch target.'}); return; }
@@ -80,5 +90,58 @@
       }, function (err) { finish(failure(err)); });
     } catch (err) { finish(failure(err)); }
   }
-  window.FrameDevice = { launch: launch, launchApp: launchApp, art: art, home: home, settings: settings, apps: apps };
+  function tv() { return window.tizen; }
+  /* The CEC / friendly name the TV reports for an input, or '' when it reports none. */
+  function cecName(s) {
+    var keys = ['name', 'sourceName', 'label', 'deviceName', 'connectedName', 'friendlyName', 'displayName'], i, v;
+    for (i = 0; i < keys.length; i++) { v = s && s[keys[i]]; if (typeof v === 'string' && v.trim()) return v.trim(); }
+    return '';
+  }
+  /* Connected external inputs (HDMI, AV, …). The live-TV tuner has its own tile, so TV is skipped.
+     Returns [] in the browser preview or where the TV source APIs are unavailable. */
+  function sources(done) {
+    var t = tv();
+    if (!api() || !t || !t.systeminfo || !t.tvwindow || typeof t.systeminfo.getPropertyValue !== 'function') { done(null, []); return; }
+    var finish = bounded(done, 8000);
+    try {
+      t.systeminfo.getPropertyValue('VIDEOSOURCE', function (info) {
+        var connected = info && info.connected && info.connected.length ? info.connected : (info && info.length ? info : []);
+        var out = [];
+        [].forEach.call(connected || [], function (s) {
+          if (!s || s.type === 'TV') return;
+          out.push({ type: s.type, number: s.number, cec: cecName(s), raw: s });
+        });
+        finish(null, out);
+      }, function () { finish(null, []); });
+    } catch (err) { finish(null, []); }
+  }
+  function switchSource(source, done) {
+    var t = tv();
+    if (!api() || !t || !t.tvwindow) { unavailable(done); return; }
+    var finish = bounded(done, 12000);
+    try {
+      t.tvwindow.setSource(source && source.raw ? source.raw : source, function () {
+        // Setting the source leaves CleanFrame on top; open the TV viewer so the input fills the screen.
+        launchApp('org.tizen.tv-viewer', function () { finish(null); });
+      }, function (err) { finish(failure(err)); }, 'MAIN');
+    } catch (err) { finish(failure(err)); }
+  }
+  /* Live TV shares org.tizen.tv-viewer with the HDMI inputs, and the viewer resumes its last source.
+     Force the source back to TV before opening it, else Live TV reopens the last HDMI input. */
+  function liveTv(done) {
+    if (!api()) { unavailable(done); return; }
+    var t = tv();
+    if (!t || !t.tvwindow || !t.systeminfo || typeof t.systeminfo.getPropertyValue !== 'function') { launchApp('org.tizen.tv-viewer', done); return; }
+    var finish = bounded(done, 12000);
+    function openViewer() { launchApp('org.tizen.tv-viewer', function () { finish(null); }); }
+    try {
+      t.systeminfo.getPropertyValue('VIDEOSOURCE', function (info) {
+        var all = (info && info.connected) || [], tvSrc = null, i;
+        for (i = 0; i < all.length; i++) if (all[i] && all[i].type === 'TV') { tvSrc = all[i]; break; }
+        try { t.tvwindow.setSource(tvSrc || { type: 'TV', number: 0 }, openViewer, openViewer, 'MAIN'); }
+        catch (e) { openViewer(); }
+      }, function () { openViewer(); });
+    } catch (err) { openViewer(); }
+  }
+  window.FrameDevice = { launch: launch, launchApp: launchApp, art: art, home: home, settings: settings, apps: apps, sources: sources, switchSource: switchSource, liveTv: liveTv };
 }());
