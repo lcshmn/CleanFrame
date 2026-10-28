@@ -104,7 +104,7 @@
   var S = {
     variant: 'B', geom: 'broad', c: null, stack: null,
     sel: null, selIdx: 0, lastUtil: 0, appsFocus: null, settingsFocus: 'background', appearanceFocus: 'bg', detailFocus: {},
-    inputsByKey: {}, detectedKeys: [],
+    inputsByKey: {}, detectedKeys: [], previewVisible: false, previewBusy: false,
     undo: [], removedAt: {}, note: null, err: null,
     writes: 0, failed: 0, log: [], logN: 0, lastLaunch: null, press: null,
     wallShown: null, wallPending: null, wallError: null,
@@ -378,7 +378,8 @@
       font: pick(modern.font, LOOK_VALUES.font, 'manrope'), wall: wall(modern.wall || s.wallpaper) ? modern.wall || s.wallpaper : WALLS[0].id,
       home: h, recent: recent, lastApp: h.indexOf(s.lastApp) >= 0 ? s.lastApp : h[0],
       mode: pick(s.mode, MODES.map(function (m) { return m.id; }), 'fixed'),
-      inputs: (s.inputs && typeof s.inputs === 'object' && !Array.isArray(s.inputs)) ? sanitiseInputs(s.inputs) : sanitiseInputs(INPUT_DEFAULTS)
+      inputs: (s.inputs && typeof s.inputs === 'object' && !Array.isArray(s.inputs)) ? sanitiseInputs(s.inputs) : sanitiseInputs(INPUT_DEFAULTS),
+      preview: s.preview === true
     };
   }
   function serialise(c) {
@@ -404,7 +405,7 @@
   }
   function clearSession() { S.undo = []; S.removedAt = {}; S.note = null; S.err = null; }
   function begin() { S.note = null; }
-  function next(home, recent) { var c = lookOf(S.c); c.home = home; c.recent = recent; c.lastApp = S.c.lastApp; c.mode = S.c.mode; c.inputs = S.c.inputs; return c; }
+  function next(home, recent) { var c = lookOf(S.c); c.home = home; c.recent = recent; c.lastApp = S.c.lastApp; c.mode = S.c.mode; c.inputs = S.c.inputs; c.preview = S.c.preview; return c; }
   function snap() { return { home: S.c.home.slice(), recent: S.c.recent.slice() }; }
   function pushRecent(list, id) { return [id].concat(without(list, id)).slice(0, 5); }
   function write(c, label) {
@@ -933,9 +934,11 @@
     ];
     if (t.group === 'rotation') return [{ id: 'mode', title: '', items: options('mode', MODES.map(function (m) { return m.id; }), flat),
       reason: flat ? 'Choose Photo in Background to use rotation.' : 'Timed changes pause while Settings or another panel is open.' }];
-    if (t.group === 'inputs') return [{ id: 'inputs', title: 'Connected inputs', items: S.detectedKeys.map(function (key) {
-      return { action: 'input.' + key, inputOpen: key, label: inputDisplayName(key), description: (S.inputsByKey[key] && S.inputsByKey[key].port) || key };
-    }) }];
+    if (t.group === 'inputs') return [
+      { id: 'preview', title: 'Live preview', items: [{ action: 'preview.toggle', previewToggle: true, checkable: true, checked: !!S.c.preview, label: S.c.preview ? 'On' : 'Off', description: 'Show the current source in a small window on Home' }] },
+      { id: 'inputs', title: 'Connected inputs', items: S.detectedKeys.map(function (key) {
+        return { action: 'input.' + key, inputOpen: key, label: inputDisplayName(key), description: (S.inputsByKey[key] && S.inputsByKey[key].port) || key };
+      }) }];
     if (isInputGroup(t.group)) {
       var ikey = t.group.slice(6), current = (S.c.inputs && S.c.inputs[ikey]) || '', cec = inputCec(ikey), items = [];
       items.push({ action: 'inputname.' + ikey + '.def', inputKey: ikey, inputName: '', label: defaultInputName(ikey) + ' (default)', checkable: true, checked: !current });
@@ -1018,6 +1021,54 @@
     closeInputText();
     if (key) setInputName(key, value); // empty clears back to the default name
   }
+  function setPreview(on) {
+    var c = next(S.c.home.slice(), S.c.recent.slice());
+    c.preview = !!on;
+    if (write(c, 'Live preview')) previewSync();
+  }
+  /* Live source preview. On the TV the current source (tuner or active HDMI) shows on the FRONT
+     video plane over this box, so no transparent hole is needed. The browser preview shows only
+     the placeholder frame, which still lets the box position be checked. */
+  var previewEl = null;
+  function previewTvWindow() { return window.tizen && window.tizen.tvwindow; }
+  function ensurePreviewEl() {
+    if (previewEl) return previewEl;
+    var o = document.createElement('div');
+    o.className = 'live-preview'; o.hidden = true;
+    o.innerHTML = '<div class="live-preview-frame"><span class="live-preview-ph">Live preview shows here on the TV</span></div>'
+      + '<div class="live-preview-cap"><span class="live-dot"></span><span>Live</span></div>';
+    stage.appendChild(o);
+    previewEl = o; return o;
+  }
+  function previewBoxVisible() { return !!(S.c && S.c.preview) && top().id === 'home'; }
+  function previewWanted() { return previewBoxVisible() && !document.hidden && !busy; }
+  function previewSync() {
+    var o = ensurePreviewEl();
+    o.hidden = !previewBoxVisible();
+    var tvw = previewTvWindow();
+    if (!tvw) return; // browser: placeholder box only
+    var want = previewWanted();
+    if (S.previewBusy || want === S.previewVisible) return;
+    S.previewBusy = true;
+    if (want) {
+      var r = o.querySelector('.live-preview-frame').getBoundingClientRect();
+      var rect = [Math.round(r.left) + 'px', Math.round(r.top) + 'px', Math.round(r.width) + 'px', Math.round(r.height) + 'px'];
+      try {
+        tvw.show(function () { S.previewBusy = false; S.previewVisible = true; o.className = 'live-preview is-live'; previewSync(); },
+          function () { S.previewBusy = false; S.previewVisible = false; }, rect, 'MAIN', 'FRONT');
+      } catch (e) { S.previewBusy = false; }
+    } else {
+      try {
+        tvw.hide(function () { S.previewBusy = false; S.previewVisible = false; if (previewEl) previewEl.className = 'live-preview'; previewSync(); },
+          function () { S.previewBusy = false; }, 'MAIN');
+      } catch (e) { S.previewBusy = false; }
+    }
+  }
+  function previewReshow() {
+    var tvw = previewTvWindow();
+    if (tvw && S.previewVisible) { S.previewVisible = false; try { tvw.hide(function () {}, function () {}, 'MAIN'); } catch (e) {} }
+    previewSync();
+  }
   function detailBack() { cancelLook(); S.err = null; pop(); }
   function detailOk(t, item) {
     var patch = {}, error = S.lookError;
@@ -1029,6 +1080,7 @@
       else if (error) setLook(error.patch, { row: error.row });
     } else if (item.axis === 'mode') applyRotation(item.value);
     else if (item.axis) { patch[item.axis] = item.value; setLook(patch, { row: item.axis }); }
+    else if (item.previewToggle) setPreview(!S.c.preview);
     else if (item.inputOpen !== undefined) openAppearance('input:' + item.inputOpen);
     else if (item.custom) openInputText(item.inputKey);
     else if (item.inputKey !== undefined) setInputName(item.inputKey, item.inputName);
@@ -1091,6 +1143,7 @@
     norm();
     render();
     syncRotation();
+    previewSync();
   }
 
   /* ---------- Rendering ---------- */
@@ -1969,14 +2022,14 @@
   window.addEventListener('focus', function () { release(); focusStage(); after(); updateClock(); loadSources(); });
   document.addEventListener('visibilitychange', function () {
     heldKeys = {};
-    if (document.hidden) { pauseRotation(); clearTimeout(clockTimer); }
+    if (document.hidden) { pauseRotation(); clearTimeout(clockTimer); previewSync(); }
     else {
       release();
       if (S.c.bg === 'photo' && !S.pending && !S.previewBundle && (!committedBundle || S.bundleKey !== bundleKey(S.c))) setLook({}, { transient: true, startup: true });
-      after(); updateClock(); focusStage(); loadSources();
+      after(); updateClock(); focusStage(); loadSources(); previewSync();
     }
   });
-  window.addEventListener('resize', fit);
+  window.addEventListener('resize', function () { fit(); previewReshow(); });
 
   /* Readable browser checks use the real state and actions, without fake outcomes. */
   var NAV = { left: 'left', right: 'right', up: 'up', down: 'down', ok: 'ok', enter: 'ok', back: 'back', escape: 'back' };
@@ -2012,5 +2065,5 @@
   cueL.innerHTML = icon('left'); cueR.innerHTML = icon('right');
   initialise();
   setLook({}, { transient: true, startup: true });
-  norm(); render(); fit(); focusStage(); updateClock(); syncRotation(); loadSources();
+  norm(); render(); fit(); focusStage(); updateClock(); syncRotation(); loadSources(); previewSync();
 })();

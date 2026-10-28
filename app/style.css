@@ -643,3 +643,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:#000}
 .name-entry-field:focus{border-color:var(--solid-ink)}
 .name-entry-hint{display:flex;align-items:center;margin:28px 0 0;font-size:26px;line-height:36px;color:var(--solid-mute)}
 .name-entry-hint>*+*{margin-left:16px}
+.live-preview{position:absolute;top:92px;left:750px;width:420px;z-index:4}
+.live-preview[hidden]{display:none}
+.live-preview-frame{width:420px;height:236px;border-radius:16px;background:#05070d;border:1px solid rgba(255,255,255,.16);display:flex;align-items:center;justify-content:center;overflow:hidden}
+.live-preview-ph{font-size:24px;line-height:32px;color:var(--mute);padding:0 24px;text-align:center}
+.live-preview-cap{display:flex;align-items:center;margin-top:14px;font-size:24px;line-height:32px;color:var(--mute)}
+.live-preview .live-dot{width:12px;height:12px;border-radius:50%;background:#8393a4;margin-right:12px}
+.live-preview.is-live .live-dot{background:#59d58b}
